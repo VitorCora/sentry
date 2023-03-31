@@ -1,0 +1,620 @@
+Parameters:
+  BootstrapAPIToken:
+    Type: String
+    NoEcho: true
+    Description: 'Warning: Do not modify this field. Modifications may cause your deployment to fail.'
+  APIEndpoint:
+    Type: String
+    Description: 'Warning: Do not modify this field. Modifications may cause your deployment to fail.'
+  StackDeployVersion:
+    Default: latest
+    Type: String
+    Description: 'Warning: Do not modify this field. Modifications may cause your deployment to fail.'
+  SentryStackSetName:
+    Type: String
+    Default: SentryStackSet
+    Description: 'Warning: Do not modify this field. Modifications may cause your deployment to fail.'
+  ResourceBucketPrefix:
+    Type: String
+    Default: cloud-one-sentry-
+    Description: 'Warning: Do not modify this field. Modifications may cause your deployment to fail.'
+  SentryStackRegions:
+    Type: CommaDelimitedList
+    Default: us-east-1,us-east-2
+    Description: 'Warning: Do not modify this field. Modifications may cause your deployment to fail.'
+  ResourceNamePrefix:
+    Type: String
+    Default: cloud-sentry
+    Description: 'Warning: Do not modify this field. Modifications may cause your deployment to fail.'
+Resources:
+  AssumeSentryStackSetsExecutionRolePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub '${ResourceNamePrefix}-assume-stack-set-execution-role'
+      Roles:
+        - !Ref 'SentryStackSetsAdministrationRole'
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - sts:AssumeRole
+            Resource: !GetAtt 'SentryStackSetsExecutionRole.Arn'
+  BootstrapTokenCustom:
+    Type: Custom::GenerateSentryAPIToken
+    Properties:
+      ServiceToken: !GetAtt 'GenerateSentryAPITokenFunction.Arn'
+      SecretName: !Ref 'SentryAPITokenSecret'
+      APITokenEndpoint: !Sub '${APIEndpoint}/api/api-tokens'
+      BootstrapAPIToken: !Ref 'BootstrapAPIToken'
+      ProviderAccount: !Ref 'AWS::AccountId'
+  FilterUnsupportedRegionsCustom:
+    Type: Custom::FilterUnsupportedRegions
+    Properties:
+      ServiceToken: !GetAtt 'FilterUnsupportedRegionsFunction.Arn'
+      SentryStackRegions: !Ref 'SentryStackRegions'
+  FilterUnsupportedRegionsFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'SentrySet-${ResourceNamePrefix}-UnsupportedRegionsFilter'
+      Code:
+        S3Bucket: !Sub '${ResourceBucketPrefix}${AWS::Region}'
+        S3Key: !Sub
+          - lambdas/stack-aws-templates/stackAwsTemplateLambdas/${version}/stackAwsTemplateLambdas.zip
+          - version: !Ref 'StackDeployVersion'
+      Handler: filter_unsupported_regions_handler.handler
+      Runtime: python3.9
+      Timeout: 30
+      Role: !GetAtt 'FilterUnsupportedRegionsFunctionRole.Arn'
+  FilterUnsupportedRegionsFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+  GenerateSentryAPITokenFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'SentrySet-${ResourceNamePrefix}-SentryAPITokenGenerator'
+      Code:
+        S3Bucket: !Sub '${ResourceBucketPrefix}${AWS::Region}'
+        S3Key: !Sub
+          - lambdas/stack-aws-templates/stackAwsTemplateLambdas/${version}/stackAwsTemplateLambdas.zip
+          - version: !Ref 'StackDeployVersion'
+      Handler: api_token_initializer_handler.handler
+      Runtime: python3.9
+      Timeout: 30
+      Role: !GetAtt 'GenerateSentryAPITokenFunctionRole.Arn'
+  GenerateSentryAPITokenFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: !Sub '${ResourceNamePrefix}-OverrideAPIToken'
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:PutSecretValue
+                Resource: !Ref 'SentryAPITokenSecret'
+  ReplicateSentryAPItokenCustom:
+    Type: Custom::ReplicateSentryAPItoken
+    Properties:
+      ServiceToken: !GetAtt 'ReplicateSentryAPItokenFunction.Arn'
+      DeployRegions: !GetAtt 'FilterUnsupportedRegionsCustom.deploy_regions'
+      SecretName: !Ref 'SentryAPITokenSecret'
+  ReplicateSentryAPItokenFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'SentrySet-${ResourceNamePrefix}-ReplicateSentryAPItoken'
+      Code:
+        S3Bucket: !Sub '${ResourceBucketPrefix}${AWS::Region}'
+        S3Key: !Sub
+          - lambdas/stack-aws-templates/stackAwsTemplateLambdas/${version}/stackAwsTemplateLambdas.zip
+          - version: !Ref 'StackDeployVersion'
+      Handler: replicate_sentry_api_token_handler.handler
+      Runtime: python3.9
+      Timeout: 30
+      Role: !GetAtt 'ReplicateSentryAPItokenFunctionRole.Arn'
+  ReplicateSentryAPItokenFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ReplicatedRegions
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:ReplicateSecretToRegions
+                  - secretsmanager:RemoveRegionsFromReplication
+                Resource: !Ref 'SentryAPITokenSecret'
+  RotateSentryAPITokenFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'SentrySet-${ResourceNamePrefix}-SentryAPITokenRotator'
+      Environment:
+        Variables:
+          API_TOKEN_ENDPOINT: !Sub '${APIEndpoint}/api/api-tokens'
+          PROVIDER_ACCOUNT: !Ref 'AWS::AccountId'
+      Code:
+        S3Bucket: !Sub '${ResourceBucketPrefix}${AWS::Region}'
+        S3Key: !Sub
+          - lambdas/stack-aws-templates/stackAwsTemplateLambdas/${version}/stackAwsTemplateLambdas.zip
+          - version: !Ref 'StackDeployVersion'
+      Handler: api_token_rotator_handler.handler
+      Runtime: python3.9
+      Timeout: 30
+      Role: !GetAtt 'RotateSentryAPITokenFunctionRole.Arn'
+  RotateSentryAPITokenFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: !Sub '${ResourceNamePrefix}-RotateAPIToken'
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:UpdateSecretVersionStage
+                  - secretsmanager:PutSecretValue
+                Resource: !Ref 'SentryAPITokenSecret'
+  RotatorAccessSentryAPITokenPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref 'RotateSentryAPITokenFunction'
+      Action: lambda:InvokeFunction
+      Principal: secretsmanager.amazonaws.com
+  SentryAPITokenScheduleRotator:
+    Type: AWS::SecretsManager::RotationSchedule
+    DependsOn: RotatorAccessSentryAPITokenPermission
+    Properties:
+      RotateImmediatelyOnUpdate: false
+      RotationLambdaARN: !GetAtt 'RotateSentryAPITokenFunction.Arn'
+      RotationRules:
+        AutomaticallyAfterDays: 7
+      SecretId: !Ref 'SentryAPITokenSecret'
+  SentryAPITokenSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      Name: !Sub '${ResourceNamePrefix}-APITokenSecret2'
+      Description: Sentry API Token
+      SecretString: '{"SentryServiceAPIKey":""}'
+  SentrySetLambdaUpdaterFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'SentrySet-${ResourceNamePrefix}-LambdaUpdater'
+      Environment:
+        Variables:
+          API_ENDPOINT: !Ref 'APIEndpoint'
+          API_TOKEN_SECRET_NAME: !Sub '${ResourceNamePrefix}-APITokenSecret'
+          SENTRY_SET_STACK_NAME: !Ref 'AWS::StackName'
+          LAMBDA_CODE_BUCKET: !Sub '${ResourceBucketPrefix}${AWS::Region}'
+      Code:
+        S3Bucket: !Sub '${ResourceBucketPrefix}${AWS::Region}'
+        S3Key: !Sub
+          - lambdas/stack-aws-templates/stackAwsTemplateLambdas/${version}/stackAwsTemplateLambdas.zip
+          - version: !Ref 'StackDeployVersion'
+      Handler: lambda_updater_handler.handler
+      Runtime: python3.9
+      Role: !GetAtt 'SentrySetLambdaUpdaterLambdaRole.Arn'
+      Timeout: 900
+  SentrySetLambdaUpdaterFunctionSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub 'SentrySet-${ResourceNamePrefix}-LambdaUpdaterFunctionSchedule'
+      ScheduleExpression: rate(1 hour)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt 'SentrySetLambdaUpdaterFunction.Arn'
+          Id: LambdaUpdater
+          RetryPolicy:
+            MaximumEventAgeInSeconds: 600
+            MaximumRetryAttempts: 3
+  SentrySetLambdaUpdaterFunctionSchedulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt 'SentrySetLambdaUpdaterFunction.Arn'
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt 'SentrySetLambdaUpdaterFunctionSchedule.Arn'
+  SentrySetLambdaUpdaterLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: !Sub 'SentrySet-${ResourceNamePrefix}-ListStackResource'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action: cloudformation:ListStackResources
+                Effect: Allow
+                Resource:
+                  - !Ref 'AWS::StackId'
+        - PolicyName: !Sub 'SentrySet-${ResourceNamePrefix}-GetS3Object'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action: s3:GetObject
+                Effect: Allow
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::${ResourceBucketPrefix}${AWS::Region}/lambdas/*'
+        - PolicyName: !Sub 'SentrySet-${ResourceNamePrefix}-UpdateLambdaCode'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                  - lambda:GetFunctionConfiguration
+                  - lambda:UpdateFunctionConfiguration
+                  - lambda:UpdateFunctionCode
+                Effect: Allow
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:SentrySet-${ResourceNamePrefix}-*'
+        - PolicyName: !Sub 'SentrySet-${ResourceNamePrefix}-GetAPIToken'
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ResourceNamePrefix}-APITokenSecret-*'
+  SentrySetLogGroupsConfigSetterCustom:
+    Type: Custom::SentrySetLogGroupsConfigSetter
+    Properties:
+      ServiceToken: !GetAtt 'SentrySetLogGroupsConfigSetterFunction.Arn'
+  SentrySetLogGroupsConfigSetterFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'SentrySet-${ResourceNamePrefix}-LogGroupsConfigSetter'
+      Environment:
+        Variables:
+          SENTRYSET_LOG_GROUPS_CONFIG_SETTER_FUNCTION: !Sub 'SentrySet-${ResourceNamePrefix}-LogGroupsConfigSetter'
+          FILTER_UNSUPPORTED_REGIONS_FUNCTION: !Sub '${FilterUnsupportedRegionsFunction}'
+          GENERATE_SENTRY_API_TOKEN_FUNCTION: !Sub '${GenerateSentryAPITokenFunction}'
+          ROTATE_SENTRY_API_TOKEN_FUNCTION: !Sub '${RotateSentryAPITokenFunction}'
+          SENTRYSET_LAMBDA_UPDATER_FUNCTION: !Sub '${SentrySetLambdaUpdaterFunction}'
+          STACK_RESOURCE_BUCKET_UPDATE_CLEANER_FUNCTION: !Sub '${StackResourceBucketUpdateCleanerFunction}'
+          SENTRYSET_TELEMETRY_COLLECTOR_FUNCTION: !Sub '${SentrySetTelemetryCollectorFunction}'
+          REPLICATE_SENTRY_API_TOKEN_FUNCTION: !Sub '${ReplicateSentryAPItokenFunction}'
+      Code:
+        S3Bucket: !Sub '${ResourceBucketPrefix}${AWS::Region}'
+        S3Key: !Sub
+          - lambdas/stack-aws-templates/stackAwsTemplateLambdas/${version}/stackAwsTemplateLambdas.zip
+          - version: !Ref 'StackDeployVersion'
+      Handler: log_groups_config_setter_handler.handler
+      Runtime: python3.9
+      Role: !GetAtt 'SentrySetLogGroupsConfigSetterLambdaRole.Arn'
+      Timeout: 900
+  SentrySetLogGroupsConfigSetterLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: !Sub '${ResourceNamePrefix}-SentrySetLogGroupsConfigSetterFunctionRolePolicy'
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - logs:CreateLogGroup
+                  - logs:PutRetentionPolicy
+                Effect: Allow
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/SentrySet-${ResourceNamePrefix}*'
+  SentrySetTelemetryCollectorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'SentrySet-${ResourceNamePrefix}-TelemetryCollector'
+      Environment:
+        Variables:
+          API_ENDPOINT: !Ref 'APIEndpoint'
+          API_TOKEN_SECRET_NAME: !Sub '${ResourceNamePrefix}-APITokenSecret'
+          RESOURCE_NAME_PREFIX: !Sub 'SentrySet-${ResourceNamePrefix}'
+      Code:
+        S3Bucket: !Sub '${ResourceBucketPrefix}${AWS::Region}'
+        S3Key: !Sub
+          - lambdas/stack-aws-templates/stackAwsTemplateLambdas/${version}/stackAwsTemplateLambdas.zip
+          - version: !Ref 'StackDeployVersion'
+      Handler: telemetry_collector_handler.handler
+      Runtime: python3.9
+      Role: !GetAtt 'SentrySetTelemetryCollectorLambdaRole.Arn'
+      Timeout: 900
+  SentrySetTelemetryCollectorFunctionSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub 'SentrySet-${ResourceNamePrefix}-TelemetryCollectorFunctionSchedule'
+      ScheduleExpression: rate(6 hours)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt 'SentrySetTelemetryCollectorFunction.Arn'
+          Id: TelemetryCollector
+          RetryPolicy:
+            MaximumEventAgeInSeconds: 600
+            MaximumRetryAttempts: 3
+  SentrySetTelemetryCollectorLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: !Sub 'SentrySet-${ResourceNamePrefix}-QueryLogs'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action: logs:DescribeLogGroups
+                Effect: Allow
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:*'
+              - Action: logs:StartQuery
+                Effect: Allow
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/SentrySet-${ResourceNamePrefix}*'
+              - Action: logs:GetQueryResults
+                Effect: Allow
+                Resource: '*'
+        - PolicyName: !Sub 'SentrySet-${ResourceNamePrefix}-GetAPIToken'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Sub 'arn:${AWS::Partition}:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${ResourceNamePrefix}-APITokenSecret-*'
+  SentrySetTelemetryCollectorSchedulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt 'SentrySetTelemetryCollectorFunction.Arn'
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt 'SentrySetTelemetryCollectorFunctionSchedule.Arn'
+  SentryStackSet:
+    Type: AWS::CloudFormation::StackSet
+    Properties:
+      StackSetName: !Ref 'SentryStackSetName'
+      Description: SentryStackSet
+      PermissionModel: SELF_MANAGED
+      Capabilities:
+        - CAPABILITY_AUTO_EXPAND
+        - CAPABILITY_IAM
+        - CAPABILITY_NAMED_IAM
+      AdministrationRoleARN: !GetAtt 'SentryStackSetsAdministrationRole.Arn'
+      ExecutionRoleName: !Ref 'SentryStackSetsExecutionRole'
+      Parameters:
+        - ParameterKey: APIEndpoint
+          ParameterValue: !Ref 'APIEndpoint'
+        - ParameterKey: StackDeployVersion
+          ParameterValue: !Ref 'StackDeployVersion'
+        - ParameterKey: ResourceBucketPrefix
+          ParameterValue: !Ref 'ResourceBucketPrefix'
+        - ParameterKey: SentryAPITokenSecretName
+          ParameterValue: !Sub '${ResourceNamePrefix}-APITokenSecret'
+        - ParameterKey: SentryStackSetName
+          ParameterValue: !Ref 'SentryStackSetName'
+        - ParameterKey: ResourceNamePrefix
+          ParameterValue: !Ref 'ResourceNamePrefix'
+      ManagedExecution:
+        Active: true
+      TemplateURL: !Sub
+        - https://${bucketPrefix}${region}.s3.amazonaws.com/templates/${version}/Sentry.yaml
+        - bucketPrefix: !Ref 'ResourceBucketPrefix'
+          region: !Ref 'AWS::Region'
+          version: !Ref 'StackDeployVersion'
+      StackInstancesGroup:
+        - DeploymentTargets:
+            Accounts:
+              - !Ref 'AWS::AccountId'
+          Regions: !GetAtt 'FilterUnsupportedRegionsCustom.deploy_regions'
+      OperationPreferences:
+        RegionConcurrencyType: PARALLEL
+  SentryStackSetsAdministrationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+            Action: sts:AssumeRole
+  SentryStackSetsExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !GetAtt 'SentryStackSetsAdministrationRole.Arn'
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub '${ResourceNamePrefix}-allow-deploy-stack-actions'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: cloudformation:*
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:AttachRolePolicy
+                  - iam:PutRolePolicy
+                  - iam:PassRole
+                  - iam:DetachRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:GetRole
+                  - iam:DeleteRole
+                  - iam:GetRolePolicy
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - kms:CreateGrant
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                  - kms:Encrypt
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - lambda:ListTags
+                  - lambda:UpdateFunctionCode
+                  - lambda:UpdateFunctionConfiguration
+                  - lambda:CreateFunction
+                  - lambda:TagResource
+                  - lambda:DeleteFunction
+                  - lambda:GetFunction
+                  - lambda:GetFunctionCodeSigningConfig
+                  - lambda:AddPermission
+                  - lambda:RemovePermission
+                  - lambda:GetLayerVersion
+                  - lambda:InvokeFunction
+                Resource: '*'
+              - Effect: Allow
+                Action: s3:*
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - sqs:SetQueueAttributes
+                  - sqs:GetQueueUrl
+                  - sqs:GetQueueAttributes
+                  - sqs:DeleteQueue
+                  - sqs:CreateQueue
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - events:PutRule
+                  - events:RemoveTargets
+                  - events:DescribeRule
+                  - events:DeleteRule
+                  - events:PutTargets
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeNetworkInterfaces
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - states:CreateStateMachine
+                  - states:TagResource
+                  - states:DescribeStateMachine
+                  - states:DeleteStateMachine
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - logs:PutRetentionPolicy
+                  - logs:CreateLogGroup
+                  - logs:DeleteLogGroup
+                Resource: '*'
+  StackResourceBucketUpdateCleanerCustom:
+    Type: Custom::StackResourceBucketUpdateCleaner
+    Properties:
+      ServiceToken: !GetAtt 'StackResourceBucketUpdateCleanerFunction.Arn'
+    DependsOn: SentryStackSet
+  StackResourceBucketUpdateCleanerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'SentrySet-${ResourceNamePrefix}-StackResourceBucketUpdateCleaner'
+      Environment:
+        Variables:
+          AWS_ACCOUNT_ID: !Ref 'AWS::AccountId'
+      Code:
+        S3Bucket: !Sub '${ResourceBucketPrefix}${AWS::Region}'
+        S3Key: !Sub
+          - lambdas/stack-aws-templates/stackAwsTemplateLambdas/${version}/stackAwsTemplateLambdas.zip
+          - version: !Ref 'StackDeployVersion'
+      Handler: update_bucket_cleaner_handler.handler
+      Runtime: python3.9
+      Role: !GetAtt 'StackResourceBucketUpdateCleanerLambdaRole.Arn'
+      Timeout: 900
+  StackResourceBucketUpdateCleanerLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: !Sub '${ResourceNamePrefix}-StackResourceBucketUpdateCleanerFunction'
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - s3:DeleteBucket
+                  - s3:DeleteObject
+                  - s3:DeleteObjectVersion
+                  - s3:PutLifecycleConfiguration
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                Effect: Allow
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::stackset-sentrystackset-*'
+              - Action:
+                  - s3:ListAllMyBuckets
+                Effect: Allow
+                Resource: '*'
